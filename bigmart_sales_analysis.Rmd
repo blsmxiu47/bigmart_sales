@@ -1,0 +1,468 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+  
+###SO the goal here is to:
+> try to understand the properties of products and stores which play a key role in increasing sales at BigMart.
+  
+  
+-----
+Let's begin by reading in the data
+```{r}
+library(tidyverse)
+#Read in train and test data
+train <- read_csv('train.csv')
+test <- read_csv('test.csv')
+
+#We'll label our data based on whether it comes from the train or test set to be separated later, but for now we'll join the tibbles to perform some tidying operations
+train['source'] <- 'train'
+test['source'] <- 'test'
+data <- train %>%
+        full_join(test)
+```
+```{r}
+#Check out the dimensions of train, test, and data just to make sure everything joined as planned
+dim(train)
+dim(test)
+dim(data)
+```
+```{r}
+#Look at data in a bit mroe detail
+str(data)
+head(data)
+names(data)
+```
+  
+  
+**Preliminary notes**
+So we have 12 columns here, plus the 'source' column we added. Our first task is to think about which variables we can actually use in our analysis. That is, #1: is the variable something that would plausibly have an impact on the sales of the product, #2: given that the variable represents a metric we are interested in, is the data included physically sufficient for us to use (e.g. not 80% NA values, etc.)
+  
+Right off the bat, we can see there are a few variables that may not be interesting as they stand now, just by looking at the names and first few values:
+--Item_weight: Customers won't generally inclined to buy a product because it is heavier, and the heaviness off a product shouldn't be a factor when they decide on their purchase. If it is really a larger product, say an appliance, the weight will generally be true of all similar appliances, and wouldn't be specific to that particular Item_ID
+--Item_MRP: The MRP (list price) will likely be correlated with sales automatically since sales are calculated as the product of price and quantity. We may want to adjust for this later
+--Outlet_Establishment_Year: While the 'run down' factor could be influential in the popularity of a location, the establishment year doesn't give us this information. Neither does it tell us whether or not an older location has developed a stronger longterm customer base.
+  
+  
+Now, looking at the remaining 9 variables we intend to analyze:
+--Item_Identifier: Product ID (used to identify each unique product)
+--Item_Fat_Content: Consumers generally attracted to items with lower fat
+--Item_Visibility: Higher visibility means customers are more likely to actually see the product during their trip to the store, and perhaps this increases the likelihood that a product will be purchased
+--Item_Type: Product category may be correlated with sales
+--Outlet_Identifier: Store ID (used to identify each location)
+--Outlet_Size: Linked with store capacity; customers will be more inclined to visit stores with a wide variety of products so as to do all their shopping in one place (convenience factor)
+--Outlet_Location_Type: Tier 1~3, More urban (tier 1) stores ought to have the benefit of higher population density and generally customers with higher incomes
+--Outlet_Type: Supermarket Type1/2/3 or Grocery Store. Again the capacity and variety available makes locations more or less attractive (convenience factor)
+--Item_Outlet_Sales: Our dependent variable; the outcome we are looking to explain
+```{r}
+#Just as an example, a simple way to look at the different values a discrete variable can take:
+unique(data$Outlet_Type)
+```
+  
+-----
+  
+**Check for null values**
+Now we'll look for NAs and get to know what we're physically working with in greater detail
+```{r}
+#Print number of NA values in each column in data
+sapply(data, function(x) sum(length(which(is.na(x)))))
+
+```
+Looks like we have 3 variables with a number of NAs.  
+Note that the 5681 NAs in outlet sales correspond exactly to the number of rows in the 'test' dataframe, so we need not worry about these.  
+We'll come back to deal with the 'Item_Weight' and 'Outlet_Size' nulls.  
+
+**Inspecting numeric and categorical variables in further detail**
+```{r}
+#Let's have a look at the quantitative variables in data
+data %>%
+        select_if(is.numeric) %>%
+        summary()
+```
+Some points to note:
+--Item_Visibility has a minimum of 0, which doesn't make much sense.
+--Outlet_Establishment_Year format won't help us in our analysis. If anything we'll change the values to something like 'years since establishment'.
+  
+  
+```{r}
+#To inspect our categorical variables, print the number of unique values per column
+sapply(data, function(x) length(unique(x)))
+```
+So looks like we have 1559 unique items, 10 unique store locations.  
+  
+Next we'll print the frequency of each unique category for each of our categorical variables (excluding Item/Outlet ID, source)
+```{r}
+categorical_freqs <- data %>%
+        select_if(is.character) %>%
+        select(-one_of(c('Item_Identifier', 'Outlet_Identifier', 'source'))) %>%
+        apply(2, table)
+
+categorical_freqs
+
+```
+Notes:
+--Looks like fat content has a few redundant labels - LF vs. low fat vs. Low Fat, reg vs. Regular
+--There are a lot of Item_Type categories with few values. It might be wise to combine some of them
+--We'll investigate whether there are significant differences between the  Type1, Type2 and Type3 supermarkets. These also could potentially be combined later on
+  
+  
+-----
+  
+  
+###Data tidying with dplyr
+Now it's time to start tidying up our dataset. Taking into account the above notes/observations, let's start cleaning up.  
+  
+First we'll take care of the null values we discovered in 'Item_Weight' and 'Outlet_Size'
+  
+**Item_Weight Nulls**
+```{r}
+#First check out where these nulls are coming from
+data %>%
+        filter(is.na(data$Item_Weight) == TRUE) %>%
+        do(head(., 20))
+```
+It appears that these NA values in Item_Weight are coming from the OUT027 and OUT019 locations
+```{r echo=FALSE}
+bigmart_theme <- theme(
+        plot.background = element_rect(fill = 'steelblue1', color = 'black', size = 3), 
+        panel.background = element_blank(), 
+        legend.key = element_blank(), 
+        legend.background = element_blank(), 
+        strip.background = element_blank(),
+        axis.title.x = element_text(face = 'bold', size = 12),
+        axis.title.y = element_text(face = 'bold', size = 12),
+        axis.text.x = element_text(face = 'bold', size = 11),
+        axis.text.y = element_text(face = 'bold', size = 11),
+        legend.title = element_text(face = 'bold', size = 12),
+        legend.text = element_text(face = 'bold', size = 11)
+        )
+```
+```{r}
+data %>%
+        ggplot(aes(x=Outlet_Identifier, y=Item_Weight)) +
+        geom_boxplot(fill = 'gray') +
+        theme_classic() +
+        bigmart_theme +
+        ggtitle('Item Weights Reported by Outlet')
+```
+So it looks like 2 outlets just haven't reported any data on item weights. Luckily the distributions of Item_Weights don't seem to vary between locations (to the point that it's unrealistic, especially considering that these data include 4 categories of outlet types.. But whatever it works in favor of our convenience here)
+  
+```{r}
+#Take a quick look at the distribution of 'Item_Weight' to see if there's any reason to prefer mean over median or vice versa
+summary(data$Item_Weight)
+```
+Doesn't appear that the choice will make much of a difference. We'll go ahead and impute by the median for 'Item_Weight'.  
+```{r}
+#Impute Item_Weight by its median to take care of missing values
+data <- data %>%
+        replace_na(list(Item_Weight = median(data$Item_Weight, na.rm = TRUE)))
+summary(data$Item_Weight)
+```
+  
+**Outlet Size Nulls**
+Let's quickly look at which outlets have NAs for Outlet_Size
+```{r}
+data %>%
+        ggplot(aes(x=Outlet_Identifier, y=Outlet_Size)) +
+        geom_point(shape = 8, size = 5) +
+        theme_classic() +
+        bigmart_theme +
+        ggtitle('Outlet Size by Outlet')
+#Print Outlet_Types of the 3 outlets missing Outlet_Size:
+data %>% filter(Outlet_Identifier == 'OUT010') %>% distinct(Outlet_Type)
+data %>% filter(Outlet_Identifier == 'OUT013') %>% distinct(Outlet_Type)
+data %>% filter(Outlet_Identifier == 'OUT045') %>% distinct(Outlet_Type)
+```
+So all we need to do here is replace the nulls in Outlet_Size with the mode Outlet_Size for a given outlet's Outlet_Type.
+We can impute by the mode grouped by 'Outlet_Type'
+```{r}
+calculate_mode <- function(x) {
+  uniq <- unique(x)
+  uniq[which.max(tabulate(match(x, uniq)))]
+}
+
+data %>%
+    group_by(Outlet_Type) %>%
+    summarise(mode = calculate_mode(Outlet_Size))
+```
+It stands to reason that grocery stores would be the the smallest type.
+  
+```{r}
+#Replace NAs in Outlet_Size with the its mode based on Outlet_Type.
+#Note: It is actually quicker for me (and R) in this case to just assign the value 'Small' to our 2 Supermarket Type1 and 1 Grocery Store outlets with NAs in Outlet_Size, but using conditionals within replace_na is just more fun ;p And it's an example of what one might do if there were more null cases
+data <- data %>%
+        replace_na(list(Outlet_Size = ifelse(data$Outlet_Type == 'Grocery Store' || data$Outlet_Type == 'Supermarket Type1', 'Small', ifelse(data$Outlet_Type == 'Supermarket Type2' || data$Outlet_Type == 'Supermarket Type3', 'Medium'))))
+
+#Once more print out the number of missing values for each column, confirming that Item_Weight and Outlet_Size are indeed null-free
+sapply(data, function(x) sum(length(which(is.na(x)))))
+```
+  
+  
+-----
+  
+###Next we'll perform some feature engineering - merging and/or modifying variables where it seems appropriate.
+  
+**Outlet Type Combinations?**
+First we'll take a look at the 'Outlet_Type' variable, in particular, whether Supermarket Type2 and Supermarket Type3 ought to be combined into one category.
+```{r}
+#Print out the mean sales grouped by Outlet_Type
+data %>%
+        group_by(Outlet_Type) %>%
+        summarise(mean_sales = mean(Item_Outlet_Sales, na.rm = TRUE))
+```
+The mean sales prove to be significantly different for Supermarket Type2 and Type3 (in fact there's not a bad spread overall), so we won't merge these categories. Merging two categories which could potentially be impacting our output variable could confound our analysis.
+  
+  
+**Item Visibility**
+Second, we'll get back to the issue of 'Item_Visibility', which had the mysterious minimun of zero.  
+The zero values are most likely just missing information, so we'll impute Item_Visibility based on the given item's (Item_Identifier's) mean visibility.
+```{r}
+#Group by the item ID and replace zero values in Item_Visibility with the corresponding item's average visibility across all stores
+data <- data %>%
+        group_by(Item_Identifier) %>%
+        mutate(Item_Visibility = replace(Item_Visibility, Item_Visibility == 0, mean(Item_Visibility)))
+summary(data$Item_Visibility)
+```
+  
+Now we have absolute visibility stats for all products in all stores, but in order to determine how a particular product's visibility at a given location impacts its sales at that location, we need to know how the product's visibility at that particular location compares with the product's visibility at other locations.  
+To understand this, we'll need to create a new metric, namely, the ratio of the product's visibility at a given store to its mean visibility across all stores.
+```{r}
+#Calculate the new variable, 'Item_Visibility_MeanRatio'
+data <- data %>%
+        group_by(Item_Identifier) %>%
+        mutate(Item_Mean_Visibility = mean(Item_Visibility)) %>%
+        mutate(Item_Visibility_MeanRatio = Item_Visibility / Item_Mean_Visibility) %>%
+        select(-Item_Mean_Visibility)
+```
+  
+  
+**Item Type Recategorization**
+Here let's take a look at mean sales by Item_Type to see if there's any worthwhile rearranging we can do
+```{r}
+data %>%
+        group_by(Item_Type) %>%
+        summarise(mean_by_type = mean(Item_Outlet_Sales, na.rm=TRUE)) %>%
+        arrange(desc(mean_by_type))
+```
+I'm curious to see what the 'Others' category looks like
+```{r}
+data %>%
+        filter(Item_Type == 'Others') %>%
+        do(head(.))
+```
+Actually by going through all 180 entries, it is clear that all 'Others' items are some form of non-consumable (marked with NC in the 'Item_Identifier column). I also just noticed that NCs also have an Item_Fat_Content entry, namely 'Low Fat'.. We'll probably change this later.  
+Let's find out what Item_Types are included in the non-consumables category
+```{r}
+data %>%
+        filter(grepl('NC', Item_Identifier)) %>%
+        group_by(Item_Type) %>%
+        distinct(Item_Type)
+        
+```
+Only these 3 Item_Types in unconsumables. It may make sense to combined Others with Health and Hygiene, but the Household type mean sales is considerably higher than the other two.  
+As such maybe there's a better way to group Item_Types than by ID code. (In addition to NC='non-consumables', there is FD='foods' and DR='drinks', but it doesn't immediately seem to make sense to combine item types in to these three categories).  
+  
+In fact, let's combine item types by utility/necessity, which seems to me like it may be more correlated with sales than whether the item happens to be food or not. Consumers will be looking to purchase some of all three ID categories (food, beverage, and non-consumable) in order to sustain their livelihood. Is there not some form of decreasing marginal returns to consumer surplus when filling your shopping cart with food vs. beverage vs. household goods, etc.? Won't you get more benefit from the first unit of laundry detergent than the 400th potato?  
+SO, that said let's group the item types as best we can by their average sales and a judgement of necessity.  
+  
+Looking at the mean_by_type column for the 16 item types above, let's see if we can't create groups based on the mean sales, and how likely the AVERAGE consumer may be to buy from a certain group.  
+What first catches my eye is the top selling item types, from 'Starchy Foods' down to 'Breads'. Once you get into the 'Meat' and 'Hard Drinks' categories, you may be cutting out a larger portion of consumers who won't be purchasing these items, or at least not as regularly as, say, 'Fruits and Vegetables'.  
+From 'Meats' down to 'Breakfast' seems to make a nice 2nd category. After 'Breakfast', average sales drop by over 100, and we get categories that you'd maybe just purchase in smaller quantities when you run out of supplies(namely 'Health and Hygiene' and 'Baking Goods'), or maybe on special occasions (for 'Soft Drinks').  
+Note: The top two categories, 'Starchy Foods' and 'Seafood' also stand out to me, but 'Starchy Foods' just seems to me a really vague way to categorize (like, aren't 'breads' starchy as well?), and we don't have enough information with this dataset to know exactly what's in there (though I imagine it would be pastas, rice, etc.). That said I'm hesitant to put it in one category alone with 'Seafood'. Seafood tends to be expensive in the U.S., so it makes sense that mean sales would be relatively high, but 'Starchy Foods' is probably leading sales due to the quantity that customers by. These are completely different products with high sales for different reasons, so I won't create a new category on the basis of sale numbers just for these two.  
+  
+OK, so let's go ahead and label these 3 groups in a new column
+```{r}
+#Add item types to variables representing our new categories
+sales_high <- c('Starchy Foods', 'Seafood', 'Fruits and Vegetables', 'Snack Foods', 'Household', 'Dairy', 'Canned', 'Breads')
+sales_med <- c('Meat', 'Hard Drinks', 'Frozen Foods', 'Breakfast')
+
+#Create the categories 'High Sales', 'Medium Sales', and 'Low Sales' in new column, 'Item_Type_Aggregate'
+data <- data %>%
+        group_by() %>%
+        mutate(Item_Type_Aggregate = ifelse(data$Item_Type %in% sales_high, 'High Sales', ifelse(data$Item_Type %in% sales_med, 'Medium Sales', 'Low Sales')))
+data %>%
+        group_by(Item_Type_Aggregate) %>%
+        distinct(Item_Type_Aggregate)
+```  
+  
+  
+  
+  
+**Outlet Establishment Year**
+Next we come to a variable we can definitely improve on for our analysis: 'Outlet_Establishment_Year'. We're going to create a new variable, 'Outlet_Years', to more intuitively represent location age.
+```{r}
+#Subtract year established from 2013, as 2013 is the year in which this sales data was collected
+data  <- data %>%
+        mutate(Outlet_Years = 2013 - Outlet_Establishment_Year)
+summary(data$Outlet_Years)
+```
+  
+  
+**Item Fat Content**
+Next we'll deal with the mislabelling of the Item_Fat_Content categories
+```{r}
+#Just a reminder of what the existing category names are
+data %>%
+        group_by(Item_Fat_Content) %>%
+        distinct(Item_Fat_Content)
+```
+```{r}
+#Replace redundant category names with 'Low Fat' and 'Regular' for the sake of consistency
+data$Item_Fat_Content <- recode(data$Item_Fat_Content,
+                                LF = 'Low Fat', 
+                                `low fat` = 'Low Fat',
+                                reg = 'Regular')
+  
+#And we musn't forget to change the fat content label for non-consumable items
+data <- data %>%
+        mutate(Item_Fat_Content = replace(Item_Fat_Content, grepl('NC', Item_Identifier), 'Non-Consumable'))
+#Check to make sure we have just the two categories remaining
+data %>% group_by(Item_Fat_Content) %>% select(Item_Fat_Content) %>% apply(2, table)
+```
+  
+```{r echo=FALSE}
+write_csv(data, 'bigmart_tidy.csv')
+```
+
+  
+-----
+  
+###Before constructing a model with our tidied and modified data, let's do some visualizaiton of the relationships between individual attributes and overall sales
+  
+**Sales on Item_MRP**
+```{r}
+#Simply Item_Outlet_Sales on Item_MRP
+ggplot(data, aes(x = Item_MRP, y = Item_Outlet_Sales)) +
+        geom_density(stat = 'identity') +
+        geom_smooth(color = 'red', size = 1.5) +
+        ggtitle('Sales on Item_MRP') +
+        bigmart_theme
+#And dividing sales by the price to adjust for the fact that sales is basically price * quantity
+ggplot(data, aes(x = Item_MRP, y = Item_Outlet_Sales / Item_MRP)) +
+        geom_density(stat = 'identity') +
+        geom_smooth(color = 'red', size = 1.5) +
+        ggtitle('Sales/Item_MRP on Item_MRP') +
+        bigmart_theme
+```
+As anticipated, the correlation between price and sales comes from the way in which Item_Outlet_Sales is calculated to begin with
+  
+  
+To see visualizations for a wider range of attributes against Item_Outlet_Sales, check out my Shiny app:
+!!!URL!!!
+  
+Below are just a few highlights and my comments:
+  
+  
+**Sales on Item_Visibility_MeanRatio**
+!!Insert .png
+We can see here that the item visibility distribution is pulled way out by products in grocery stores. What this tells us is that grocery stores in fact have much less inventory, and therefore the 'visibility' awarded to each individual item is automatically greater than it would be in a supermarket
+  
+    
+**Sales on Item_Weight**
+!!Insert .png
+From this distribution of item weights, we can see where we imputed the median for the OUT019 and OUT027 locations, which happened to be the two Type 3 supermarkets. Item_Weight doesn't look like it will be a very helpful variable anyway, which we suspected from the beginning
+  
+  
+**Sales on Item_Type_Aggregate**
+!!Insert .png
+Just using sales vs. our modified item types for a clear picture, we can see that all-in-all, outlet type has a major effect on sales. Interestingly, Type 1 supermarkets surpass Type 2 supermarkets overwhelmingly, but even more clear is the gap between grocery stores and all supermarket types.  
+  
+  
+  
+  
+  
+-----
+  
+**Preparing data for model development and testing**
+Prepare to split back into train and test sets
+```{r}
+#Drop columns we replaced
+data <- data %>%
+        select(-c(Item_Type, Outlet_Establishment_Year))
+#Set item and outlet ID pairs to row names and coerce character columns into factors (by converting data to data.frame)
+ID_cols <- paste(data$Item_Identifier, data$Outlet_Identifier)
+data_df <- as.data.frame(unclass(data), row.names = ID_cols)
+#Split back into train and test on 'source' column
+train <- data_df %>%
+        filter(source == 'train')
+test <- data_df %>%
+        filter(source == 'test')
+#Drop unnecessary columns
+train <- train %>%
+        select(-source)
+test <- test %>%
+        select(-c(source, Item_Outlet_Sales))
+```
+Export prepared train/test sets to csv files
+```{r}
+write_csv(train, 'train_new.csv')
+write_csv(test, 'test_new.csv')
+```
+```{r}
+train_1 <- train %>%
+        select(-c(Item_Identifier, Outlet_Identifier))
+```
+
+  
+  
+-----
+  
+  
+  
+**Random Forest Model**
+Now it's time to test out our model..
+```{r}
+library(randomForest)
+rf <- randomForest(Item_Outlet_Sales ~ ., ntree = 100, data = train_1)
+plot(rf)
+print(rf)
+```
+  
+```{r}
+varImpPlot(rf, sort = T, n.var = 10, 
+           main = 'Top 10 - Variable Importance')
+```
+  
+```{r}
+#Variable Importance
+var_imp = data.frame(importance(rf,  
+                                 type=2))
+# make row names as columns
+var_imp$Variables = row.names(var_imp)  
+var_imp <- var_imp[order(var_imp$IncNodePurity,decreasing = T),]
+
+ggplot(var_imp, aes(x = Variables, y = IncNodePurity)) + 
+        geom_histogram(stat = 'identity', fill='blue') +
+        theme(axis.text.x = element_text(angle = 45, hjust =  ))
+```
+
+
+
+
+-----
+
+```{r}
+#library(caret)
+#library(rpart.plot)
+#train_ctrl <- trainControl(method = "repeatedcv", number = 10, repeats = 3)
+#dtree_fit <- train(Item_Outlet_Sales ~ ., data = train, method = "rpart",
+#                   parms = list(split = "information"),
+#                   trControl=train_ctrl,
+#                   tuneLength = 10
+#                   )
+```
+
+
+-----
+
+```{r}
+#cols_to_drop <- c('Item_Weight', 'Item_MRP', 'Outlet_Establishment_Year')
+#data <- data %>%
+#        select(-one_of(cols_to_drop))
+
+#item_vis_means <- data %>%
+#        group_by(Item_Identifier) %>%
+#        summarise(mean = mean(Item_Visibility))
+#item_vis_means
+
+```
